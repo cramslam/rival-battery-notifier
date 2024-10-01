@@ -2,7 +2,8 @@
 ### 2/1/2024
 ###---------------------------------------------------------
 
-import re, subprocess, customtkinter, rivalcfg, pystray, threading, time, webbrowser
+import re, subprocess, customtkinter, rivalcfg, pystray, threading, time, webbrowser, json, os, sys, time, threading
+import winreg as reg 
 from plyer import notification
 from PIL import Image
 
@@ -21,10 +22,45 @@ root.overrideredirect(False)
 # Use a regular expression to find the battery percentage
 ping_timer = None
 next_trigger_time = None
+message_timer = None
+message_label = None
 battery_amount = 0
 battery_status = None
 time_setting = 10
 disconnected = 0
+
+CONFIG_FILE = "battery_config.json"
+
+def add_to_startup(app_name, app_path):
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    try:
+        key = reg.OpenKey(reg.HKEY_CURRENT_USER, key_path, 0, reg.KEY_ALL_ACCESS)
+        reg.SetValueEx(key, app_name, 0, reg.REG_SZ, app_path)
+        reg.CloseKey(key)
+        return True
+    except WindowsError:
+        return False
+
+def remove_from_startup(app_name):
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    try:
+        key = reg.OpenKey(reg.HKEY_CURRENT_USER, key_path, 0, reg.KEY_ALL_ACCESS)
+        reg.DeleteValue(key, app_name)
+        reg.CloseKey(key)
+        return True
+    except WindowsError:
+        return False
+
+def is_in_startup(app_name):
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    try:
+        key = reg.OpenKey(reg.HKEY_CURRENT_USER, key_path, 0, reg.KEY_READ)
+        reg.QueryValueEx(key, app_name)
+        reg.CloseKey(key)
+        return True
+    except WindowsError:
+        return False
+
 def ping():
     global ping_timer, next_trigger_time, battery_amount, battery_status, disconnected
     console_output = subprocess.run(["rivalcfg", "--battery-level"], capture_output=True, text=True)
@@ -289,50 +325,50 @@ def set_threshold(thresh_value, checkbox):
     if checkbox.get():
         if thresh_value not in notif_threshhold:
             notif_threshhold.append(thresh_value)
-            print(notif_threshhold)
-
-    elif checkbox.get() == 0:
+            notif_threshhold.sort()
+    else:
         if thresh_value in notif_threshhold:
             notif_threshhold.remove(thresh_value)
-            print(notif_threshhold)
-print (notif_threshhold)
+    print(f"Updated notification thresholds: {notif_threshhold}")
+    save_settings()  # Save settings after each change
 
 def new_threshold():
-    print("New threshold added")
-    thresh_value = threshhold_label_var.get().replace("%", "")
-    thresh_value = int(thresh_value)
-
-    if thresh_value not in checkbox_list:
-        threshold_checkbox = customtkinter.CTkCheckBox(master=checkbox_frame,
-                                                       text=f"{thresh_value}%",
-                                                       command=lambda:set_threshold(thresh_value, threshold_checkbox),
-                                                       checkbox_height=20,
-                                                       checkbox_width=20)
-        threshold_checkbox.pack(side='top', fill='x', padx=5, pady=5)
-        checkbox_list.append (thresh_value)
-    else: 
-        print("Already exists!!!!!!!!!!")
+    global notif_threshhold
+    thresh_value = int(threshhold_label_var.get().replace("%", ""))
+    
+    if thresh_value not in notif_threshhold:
+        notif_threshhold.append(thresh_value)
+        notif_threshhold.sort()
+        default_threshold()  # Refresh the checkboxes
+        save_settings()  # Save settings after adding new threshold
+    else:
+        print(f"Threshold {thresh_value}% already exists!")
 
 defaults_loaded = False
 def default_threshold():
-    global defaults_loaded
+    global defaults_loaded, checkbox_list, notif_threshhold
 
-    if not defaults_loaded:
-        default_thresholds = [5, 10, 15, 25]
-        for i,thresh in enumerate(default_thresholds):
-            if thresh not in checkbox_list:
-                checkbox = customtkinter.CTkCheckBox(master=checkbox_frame, text=f"{thresh}%")
-                checkbox.configure(command=lambda thresh_value=thresh,
-                                    checkbox=checkbox: set_threshold(thresh_value, checkbox),
-                                    checkbox_height=20,
-                                    checkbox_width=20)
-                checkbox.pack(side='top', fill='x', padx=5, pady=5)
-                checkbox.select()
-                set_threshold(thresh, checkbox)
-                checkbox_list.append(thresh)
-                print(i)
+    # Clear existing checkboxes
+    for widget in checkbox_frame.winfo_children():
+        widget.destroy()
+    checkbox_list.clear()
+
+    # Create checkboxes for all thresholds in notif_threshhold
+    for thresh in notif_threshhold:
+        checkbox = customtkinter.CTkCheckBox(
+            master=checkbox_frame,
+            text=f"{thresh}%",
+            checkbox_height=20,
+            checkbox_width=20
+        )
+        checkbox.pack(side='top', fill='x', padx=5, pady=5)
+        checkbox.select()
+        checkbox_list.append(thresh)
         
-        defaults_loaded = True
+        # Set the command after the checkbox is created
+        checkbox.configure(command=lambda value=thresh, cb=checkbox: set_threshold(value, cb))
+
+    defaults_loaded = True
 
 threshhold_label_var = customtkinter.StringVar()
 threshhold_label_var.set("50%")
@@ -340,7 +376,7 @@ threshhold_label = customtkinter.CTkLabel(master=threshold_frame, textvariable =
 threshhold_label.pack(padx=(0,28))
 threshold_slider = customtkinter.CTkSlider(master=threshold_frame, command= slider_event,number_of_steps=20,width=150 )
 threshold_slider.pack(side='left',anchor='n',padx=5)
-threshhold_button = customtkinter.CTkButton(master=threshold_frame, text="+", command = new_threshold,width=20,height=5)
+threshhold_button = customtkinter.CTkButton(master=threshold_frame, text="+", command=new_threshold, width=20, height=5)
 threshhold_button.pack(side='left',anchor='n')
 
 ###---------------------------------------------------------
@@ -423,6 +459,96 @@ def return_battery():
 
 ###---------------------------------------------------------
 
+# Autostart
+def update_status_indicator(enabled):
+    color = "#00FF00" if enabled else "#888888" 
+    status_indicator.configure(fg_color=color)
+
+def display_timed_message(message, color, duration=1500):
+    global message_timer, message_label
+    
+    # Cancel any existing timer
+    if message_timer:
+        root.after_cancel(message_timer)
+    
+    # Update or create the message label
+    if message_label:
+        message_label.configure(text=message, text_color=color)
+        message_label.pack(pady=5)
+    else:
+        message_label = customtkinter.CTkLabel(
+            master=auto_start_frame,
+            text=message,
+            font=("Arial", 10),
+            text_color=color,
+            fg_color="transparent"
+        )
+        message_label.pack(pady=5)
+    
+    # Set a new timer to hide the message
+    message_timer = root.after(duration, hide_message)
+
+def hide_message():
+    global message_label
+    if message_label:
+        message_label.pack_forget()
+
+def toggle_auto_start():
+    app_name = "Mouse Battery Notifier"
+    if getattr(sys, 'frozen', False):
+        app_path = sys.executable
+    else:
+        app_path = os.path.abspath(__file__)
+    
+    if auto_start_var.get():
+        success = add_to_startup(app_name, app_path)
+        message = "Auto-start enabled successfully"
+        color = "green"
+    else:
+        success = remove_from_startup(app_name)
+        message = "Auto-start disabled successfully"
+        color = "red"
+    
+    if success:
+        display_timed_message(message, color)
+        update_status_indicator(auto_start_var.get())
+    else:
+        display_timed_message("Failed to update auto-start settings", "red")
+
+# Update the auto-start UI elements
+auto_start_frame = customtkinter.CTkFrame(master=settings_frame)
+auto_start_label = customtkinter.CTkLabel(master=auto_start_frame, text="Auto Start Settings", font=("Arial", 12, "bold"))
+auto_start_label.pack(pady=(5,0))
+
+auto_start_container = customtkinter.CTkFrame(master=auto_start_frame, fg_color="transparent")
+auto_start_container.pack(fill="x", padx=10, pady=5)
+
+status_indicator = customtkinter.CTkLabel(
+    master=auto_start_container,
+    text="",
+    font=("Arial", 1),
+    text_color="#FFFFFF",
+    fg_color="#888888",
+    corner_radius=40,
+    width=10,
+    height=10
+)
+status_indicator.pack(side="left", padx=(0, 5))
+
+auto_start_var = customtkinter.BooleanVar(value=is_in_startup("Mouse Battery Notifier"))
+auto_start_switch = customtkinter.CTkSwitch(
+    master=auto_start_container,
+    text="Start on system startup",
+    variable=auto_start_var,
+    command=toggle_auto_start
+)
+auto_start_switch.pack(side="left")
+
+# Initialize status indicator
+update_status_indicator(auto_start_var.get())
+
+###---------------------------------------------------------
+
 def quit_window(icon, item):
     global ping_timer, return_battery_timer, is_shutting_down
     is_shutting_down = True
@@ -433,6 +559,7 @@ def quit_window(icon, item):
     if return_battery_timer is not None:
        return_battery_timer.cancel()
     
+    save_settings()
     icon.stop()
 
     if root:
@@ -457,9 +584,66 @@ def hide_window():
 
 ###---------------------------------------------------------
 
+def save_settings():
+    settings = {
+        'auto_start': auto_start_var.get(),
+        'notification_thresholds': notif_threshhold
+    }
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(settings, f)
+        print("Settings saved successfully.")
+    except Exception as e:
+        print(f"An error occurred while saving settings: {str(e)}")
+
+def load_settings():
+    global notif_threshhold
+    try:
+        if os.path.exists(CONFIG_FILE) and os.path.getsize(CONFIG_FILE) > 0:
+            with open(CONFIG_FILE, 'r') as f:
+                settings = json.load(f)
+            auto_start_var.set(settings.get('auto_start', False))
+            notif_threshhold = settings.get('notification_thresholds', [5, 10, 15, 25])
+        else:
+            # File doesn't exist or is empty, use default settings
+            auto_start_var.set(False)
+            notif_threshhold = [5, 10, 15, 25]
+    except json.JSONDecodeError:
+        print(f"Error reading {CONFIG_FILE}. Using default settings.")
+        auto_start_var.set(False)
+        notif_threshhold = [5, 10, 15, 25]
+    except Exception as e:
+        print(f"An error occurred while loading settings: {str(e)}")
+        auto_start_var.set(False)
+        notif_threshhold = [5, 10, 15, 25]
+
+    # Update the auto-start status indicator
+    update_status_indicator(auto_start_var.get())
+
+    # Ensure the auto-start variable reflects the actual system state
+    actual_auto_start_state = is_in_startup("Mouse Battery Notifier")
+    if auto_start_var.get() != actual_auto_start_state:
+        auto_start_var.set(actual_auto_start_state)
+        update_status_indicator(actual_auto_start_state)
+        print("Auto-start setting was out of sync with system state. Updated.")
+
+    print(f"Settings loaded. \n- Auto-start is {'enabled' if auto_start_var.get() else 'disabled'}.")
+    print(f"- Notification thresholds: {notif_threshhold}")
+
+def initialize_thresholds():
+    global notif_threshhold
+    if not notif_threshhold:
+        notif_threshhold = [5, 10, 15, 25]
+    default_threshold()
+
+###---------------------------------------------------------
+
+print(f"Config file path: {os.path.abspath(CONFIG_FILE)}")
+
 root.protocol('WM_DELETE_WINDOW', hide_window)
 
-default_threshold()
+load_settings()
+initialize_thresholds()
 ping()
 print_countdown()
 return_battery()
